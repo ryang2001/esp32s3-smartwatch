@@ -1,0 +1,25 @@
+# ESP-IDF build output & generated files
+build/
+build_check/
+managed_components/
+sdkconfig
+sdkconfig.old
+
+# Local secrets (never commit real values)
+components/mywifi/wifi_secrets.h
+components/mimiclaw_core/include/mimiclaw_secrets.h
+
+# Firmware binaries & flash dumps
+ota_server/*.bin
+otadata_dump.bin
+
+# Scratch / research notes
+_*.json
+_dd_url.txt
+
+# Editor / OS junk
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db

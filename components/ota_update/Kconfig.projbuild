@@ -1,0 +1,40 @@
+menu "OTA Update"
+
+    config OTA_MANIFEST_URL
+        string "OTA manifest URL"
+        default "https://example.com/watch/stable/manifest.json"
+        help
+            URL of the update manifest (JSON with version/url/sha256/notes).
+            For LAN testing use http://<PC-IP>:8000/manifest.json together
+            with CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y.
+
+    config OTA_DOWNLOAD_TIMEOUT_MS
+        int "Overall download timeout (ms)"
+        default 600000
+
+    config OTA_SELFTEST_WINDOW_MS
+        int "Self-test window (ms)"
+        range 5000 120000
+        default 15000
+        help
+            How long to observe a freshly-updated system before marking
+            the image valid. Too short may pass broken images, too long
+            delays the "update successful" notification.
+
+    config OTA_SELFTEST_MAX_BOOT_ATTEMPTS
+        int "Crash-loop rollback threshold (boots)"
+        range 2 10
+        default 3
+        help
+            Roll back to the previous slot after this many boots without
+            a successful self-test.
+
+    config OTA_VERIFY_SHA256
+        bool "Verify manifest sha256 by partition read-back"
+        default y
+        help
+            After download, read the written slot back and compare its
+            SHA-256 against the manifest. Guards against servers serving
+            a wrong (but structurally valid) image. Costs 1-3s for ~3MB.
+
+endmenu

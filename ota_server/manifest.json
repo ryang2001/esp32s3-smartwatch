@@ -1,0 +1,7 @@
+{
+  "version": "0.9.2",
+  "url": "http://192.168.10.4:8000/blink.bin",
+  "sha256": "e1e56695b062f2fe4d763b6e0d5ae1301684c3afaf0dc2d9e7ba9676d58d5646",
+  "size": 3238624,
+  "notes": "修复触摸幻触发（CST816S 空闲唤醒幽灵触摸）"
+}

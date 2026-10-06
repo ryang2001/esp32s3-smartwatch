@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ESP32-S3 启动流程可视化 · Blink</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; background:#07090d; overflow:hidden;
+    font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; color:#cfd8e3; }
+  #scaler { width:1600px; height:900px; position:absolute; transform-origin:0 0;
+    background:radial-gradient(1200px 700px at 40% 30%, #0d141d 0%, #07090d 70%); }
+
+  /* ---------- header ---------- */
+  #hdr { position:absolute; left:24px; top:12px; font-size:20px; font-weight:600; color:#fff; }
+  #hdr small { font-weight:400; color:#7d8b9d; font-size:13px; margin-left:10px; }
+  #ctrl { position:absolute; right:24px; top:10px; display:flex; gap:8px; align-items:center; }
+  #ctrl button, #ctrl select {
+    background:#182230; color:#cfd8e3; border:1px solid #2b3b4e; border-radius:6px;
+    padding:5px 12px; font-size:13px; cursor:pointer; }
+  #ctrl button:hover { background:#223449; }
+  #playBtn { min-width:92px; }
+  #stepBtn.arm { border-color:#ffd60a; color:#ffd60a; }
+
+  /* ---------- stage tabs ---------- */
+  #tabs { position:absolute; left:24px; top:52px; display:flex; gap:6px; }
+  .tab { padding:4px 12px; border-radius:14px; font-size:12.5px; cursor:pointer;
+    background:#111a24; border:1px solid #233242; color:#7d8b9d; user-select:none; }
+  .tab.on { background:#1c3a5e; border-color:#2f6cb3; color:#cfe6ff; }
+  #stepBadge { position:absolute; left:24px; top:84px; font-size:12px; color:#ffd60a;
+    background:rgba(24,34,48,.9); border:1px solid #6b5a1e; border-radius:10px;
+    padding:2px 12px; display:none; z-index:60; }
+
+  /* ---------- generic block ---------- */
+  .blk { position:absolute; border:1px solid #2b3b4e; border-radius:10px;
+    background:#101823; }
+  .blk .cap { font-size:13px; font-weight:600; color:#e8eef5; padding:7px 12px 2px; }
+  .blk .sub { font-size:11px; color:#64788d; padding:0 12px; }
+  .hl  { box-shadow:0 0 0 2px #ff9f0a, 0 0 18px rgba(255,159,10,.45) !important; }
+  .hlb { box-shadow:0 0 0 2px #32d2e0, 0 0 18px rgba(50,210,224,.4) !important; }
+  .hlg { box-shadow:0 0 0 2px #30d158, 0 0 18px rgba(48,209,88,.4) !important; }
+
+  /* ---------- cpu / regs ---------- */
+  #cpu  { left:40px; top:170px; width:250px; height:360px; }
+  #cpu1 { left:40px; top:548px; width:250px; height:74px; }
+  #rom  { left:40px; top:640px; width:250px; height:58px; }
+  .reg { display:flex; justify-content:space-between; margin:7px 12px 0;
+    font:12.5px/1.5 Consolas,monospace; background:#0b121b; border-radius:5px;
+    padding:3px 9px; border:1px solid #1d2b3b; }
+  .reg b { color:#8fa3b8; font-weight:600; }
+  .reg span { color:#ffd60a; }
+  .reg.up span { color:#30d158; text-shadow:0 0 8px rgba(48,209,88,.8); }
+
+  /* ---------- cache（文字顶部对齐，避开上下两条总线走线） ---------- */
+  #cache { left:340px; top:250px; width:130px; height:240px; }
+  .half { position:absolute; left:8px; right:8px; height:104px; border-radius:7px;
+    background:#0d1622; border:1px dashed #2b3b4e; display:flex; flex-direction:column;
+    align-items:center; justify-content:flex-start; padding-top:14px;
+    font-size:11.5px; color:#7d8b9d; }
+
+  /* ---------- flash ---------- */
+  #flash { left:540px; top:128px; width:300px; height:564px; }
+  .part { position:absolute; left:10px; right:10px; border-radius:7px;
+    background:#131e2b; border:1px solid #24374c; padding:5px 10px;
+    font-size:12px; transition:opacity .4s; overflow:hidden; }
+  .part .pa { color:#8fa3b8; font:11px Consolas,monospace; }
+  .part .pn { color:#dce7f2; font-weight:600; }
+  .part.dim { opacity:.22; }
+  .part .note { font-size:10.5px; color:#64788d; }
+  .ote { background:#0b121b; border:1px solid #24374c; border-radius:5px;
+    font:11px Consolas,monospace; color:#9fb2c6; padding:2px 7px; margin:3px 0 0; }
+  .ote.win { border-color:#30d158; color:#7dffa8; box-shadow:0 0 10px rgba(48,209,88,.35); }
+
+  /* ---------- sram / psram / lp ---------- */
+  #sram  { left:900px; top:128px; width:270px; height:300px; }
+  #psram { left:900px; top:452px; width:270px; height:150px; }
+  #lpram { left:900px; top:622px; width:270px; height:52px; }
+  .mrow { position:absolute; left:10px; right:10px; border-radius:7px;
+    background:#0d1622; border:1px dashed #2b3b4e; font-size:11.5px; color:#7d8b9d;
+    padding:6px 10px; }
+  .mrow div { font:10.5px Consolas,monospace; color:#7dffa8; }
+
+  /* ---------- peripherals ---------- */
+  .peri { position:absolute; top:714px; width:180px; height:118px; text-align:center; }
+  .peri .cap { font-size:13px; }
+  .peri .st { margin-top:8px; font-size:11px; color:#54687c; }
+  .peri.lit .st { color:#30d158; }
+  .peri.lit { border-color:#2f6cb3; }
+
+  /* ---------- wifi rings ---------- */
+  .ring { position:absolute; width:70px; height:70px; border:2px solid #32d2e0;
+    border-radius:50%; opacity:0; pointer-events:none; }
+  @keyframes ripple { 0% { transform:scale(.3); opacity:.9; } 100% { transform:scale(1.4); opacity:0; } }
+  .ring.go { animation:ripple 1.6s ease-out infinite; }
+
+  /* ---------- console ---------- */
+  #console { left:1210px; top:128px; width:352px; height:420px; overflow:hidden; }
+  #consIn { position:absolute; inset:34px 8px 8px; overflow-y:auto;
+    font:11px/1.55 Consolas,monospace; }
+  #consIn div { white-space:nowrap; }
+  .lI { color:#8fd0ff; } .lW { color:#ffd60a; } .lE { color:#ff6b60; } .lR { color:#64788d; }
+
+  /* ---------- narration ---------- */
+  #narr { left:1210px; top:562px; width:352px; height:196px; padding:10px 14px; }
+  #narr h3 { font-size:14px; color:#ffd60a; margin-bottom:6px; }
+  #narr p { font-size:12px; line-height:1.62; color:#aebccb; }
+
+  /* ---------- svg buses（z-index 在积木块之上，保证走线全程可见） ---------- */
+  #buses { position:absolute; inset:0; pointer-events:none; z-index:6; }
+  .ibus { stroke:#ff9f0a; stroke-width:3; filter:drop-shadow(0 0 4px rgba(255,159,10,.7)); opacity:.75; }
+  .dbus { stroke:#32d2e0; stroke-width:3; filter:drop-shadow(0 0 4px rgba(50,210,224,.7)); opacity:.75; }
+  .mapln { stroke:#30d158; stroke-width:2; stroke-dasharray:6 5; opacity:.9; }
+  .blbl { font:11px "Segoe UI",sans-serif; fill:#a8b8ca;
+    paint-order:stroke; stroke:#07090d; stroke-width:3px; }
+
+  /* ---------- packets ---------- */
+  .pkt { position:absolute; width:14px; height:14px; border-radius:50%; z-index:50;
+    box-shadow:0 0 12px 3px currentColor; }
+  .plbl { position:absolute; z-index:51; font:11px Consolas,monospace; color:#e8eef5;
+    background:rgba(10,16,24,.85); border:1px solid #2b3b4e; border-radius:4px;
+    padding:1px 6px; white-space:nowrap; transform:translate(-50%,-130%); }
+
+  /* ---------- sha sweep ---------- */
+  #sweepO0 { position:absolute; left:0; top:0; display:none; height:100%; border-radius:7px;
+    background:linear-gradient(90deg, transparent, rgba(48,209,88,.5)); }
+
+  /* ---------- legend & start ---------- */
+  #legend { position:absolute; left:420px; top:860px; font-size:11.5px; color:#7d8b9d;
+    display:flex; gap:26px; z-index:7; }
+  #legend i { display:inline-block; width:22px; height:3px; border-radius:2px;
+    margin:0 6px 0 0; vertical-align:middle; }
+  #startOv { position:absolute; inset:0; background:rgba(5,8,12,.72); z-index:200;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; }
+  #startOv h1 { font-size:34px; color:#fff; }
+  #startOv p { color:#8fa3b8; font-size:14px; max-width:640px; text-align:center; line-height:1.7; }
+  #startBtn { background:#0a84ff; border:none; color:#fff; font-size:18px; padding:12px 46px;
+    border-radius:24px; cursor:pointer; box-shadow:0 0 30px rgba(10,132,255,.5); }
+</style>
+</head>
+<body>
+<div id="scaler">
+
+  <div id="hdr">ESP32-S3 启动流程<small>Blink 固件 · 数据来自真机串口日志</small></div>
+  <div id="ctrl">
+    <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option>
+      <option value="2">2×</option><option value="4">4×</option></select>
+    <button id="playBtn">⏸ 暂停</button>
+    <button id="stepBtn">⏭ 步进</button>
+    <button id="resetBtn">↺ 重置</button>
+  </div>
+  <div id="tabs"></div>
+  <div id="stepBadge"></div>
+
+  <!-- cpu -->
+  <div class="blk" id="cpu">
+    <div class="cap">CPU0 · Xtensa LX7</div><div class="sub">240MHz 双核之一（主核）</div>
+    <div class="reg" id="rPC"><b>PC</b><span>--------</span></div>
+    <div class="reg" id="rSP"><b>SP</b><span>--------</span></div>
+    <div class="reg" id="rA0"><b>A0 (返回地址)</b><span>--------</span></div>
+    <div class="reg" id="rA2"><b>A2 (参数)</b><span>--------</span></div>
+  </div>
+  <div class="blk" id="cpu1"><div class="cap">CPU1 · Xtensa LX7</div>
+    <div class="sub" id="cpu1st">待命</div></div>
+  <div class="blk" id="rom"><div class="cap">Mask ROM</div>
+    <div class="sub">0x4000_0000 · 384KB · 出厂固化</div></div>
+
+  <!-- cache -->
+  <div class="blk" id="cache">
+    <div class="half" style="top:12px"><b>I-Cache 32KB</b><span>指令缓存</span></div>
+    <div class="half" style="bottom:12px"><b>D-Cache 32KB</b><span>数据缓存</span></div>
+  </div>
+
+  <!-- flash 16MB（分区行是子元素，top 相对本块） -->
+  <div class="blk" id="flash">
+    <div class="cap">SPI Flash 16MB (QIO 80MHz)</div>
+    <div class="part" id="pBl"   style="top:34px;height:38px"><span class="pn">bootloader</span> <span class="pa">0x0000</span><div class="note">二级引导 · 32KB</div></div>
+    <div class="part" id="pPt"   style="top:78px;height:34px"><span class="pn">partition table</span> <span class="pa">0x8000</span></div>
+    <div class="part" id="pOta"  style="top:118px;height:86px">
+       <span class="pn">otadata</span> <span class="pa">0xD000</span><div class="note">槽选择记录 ×2（掉电冗余）</div>
+       <div class="ote" id="ote0">entry0: seq=-------- state=--------</div>
+       <div class="ote" id="ote1">entry1: seq=-------- state=--------</div>
+    </div>
+    <div class="part" id="pO0"   style="top:210px;height:150px"><span class="pn">ota_0</span> <span class="pa">0x10000 · 4MB</span><div class="note" id="o0n">A 槽</div><div id="sweepO0"></div></div>
+    <div class="part" id="pO1"   style="top:366px;height:150px"><span class="pn">ota_1</span> <span class="pa">0x410000 · 4MB</span><div class="note" id="o1n">B 槽</div></div>
+    <div class="part" id="pAs"   style="top:522px;height:34px"><span class="pn">assets (spiffs)</span> <span class="pa">0x810000 · 8MB</span></div>
+  </div>
+
+  <!-- ram（mrow 是子元素） -->
+  <div class="blk" id="sram">
+    <div class="cap">内部 SRAM 512KB</div>
+    <div class="mrow" id="iram" style="top:36px"><b style="color:#dce7f2">IRAM</b> 0x4037_0000<br>中断向量 · 关键代码<div id="segMarksI"></div></div>
+    <div class="mrow" id="dram" style="top:134px;height:150px"><b style="color:#dce7f2">DRAM</b> 0x3FC8_0000<br>.data / .bss / FreeRTOS 堆<div id="segMarksD"></div></div>
+  </div>
+  <div class="blk" id="psram"><div class="cap">PSRAM 8MB (Octal)</div>
+    <div class="mrow" style="top:40px;height:96px">0x3C00_0000 映射区<br>帧缓冲 · 任务栈 · OTA 缓冲<div id="segMarksP"></div></div></div>
+  <div class="blk" id="lpram"><div class="cap">LP RAM 0x5000_0000</div>
+    <div class="sub">低功耗域 16KB</div><div class="sub" id="lpseg" style="font-family:Consolas,monospace;color:#7dffa8"></div></div>
+
+  <!-- peripherals -->
+  <div class="blk peri" id="peUart" style="left:40px"><div class="cap">UART0</div><div class="st">未上电</div></div>
+  <div class="blk peri" id="peSpi1" style="left:232px"><div class="cap">SPI1</div><div class="st">未上电</div></div>
+  <div class="blk peri" id="peSpi2" style="left:424px"><div class="cap">SPI2 + DMA</div><div class="st">未上电</div></div>
+  <div class="blk peri" id="peI2c"  style="left:616px"><div class="cap">I2C0</div><div class="st">未上电</div></div>
+  <div class="blk peri" id="peGpio" style="left:808px"><div class="cap">GPIO / LEDC</div><div class="st">未上电</div></div>
+  <div class="blk peri" id="peWifi" style="left:1000px"><div class="cap">WiFi/BT 射频</div><div class="st">未上电</div>
+    <div class="ring" style="left:52px;top:24px"></div><div class="ring" style="left:52px;top:24px;animation-delay:.5s"></div>
+  </div>
+
+  <!-- console + narration -->
+  <div class="blk" id="console"><div class="cap">串口日志（真机 115200）</div>
+    <div id="consIn"></div></div>
+  <div class="blk" id="narr"><h3 id="narrT">就绪</h3><p id="narrP">点击下方按钮开始模拟；「步进」可逐步执行每个原子动作。</p></div>
+
+  <div id="legend">
+    <span><i style="background:#ff9f0a"></i>指令总线 IBUS（取指）</span>
+    <span><i style="background:#32d2e0"></i>数据总线 DBUS（读写）</span>
+    <span><i style="background:#30d158;height:0;border-top:2px dashed #30d158"></i>flash 映射 XIP（不搬运）</span>
+  </div>
+
+  <!-- 总线走线（z-index 高于积木块，全程可见；文字带描边不被块背景吃掉） -->
+  <svg id="buses" width="1600" height="900">
+    <!-- IBUS: CPU -> cache -> flash bootloader/ota 区（落点 y=395 避开 ota_0 文字） -->
+    <polyline class="ibus" points="290,270 515,270 515,395 540,395"/>
+    <!-- DBUS: CPU -> cache -> SRAM -->
+    <polyline class="dbus" points="290,430 900,430"/>
+    <!-- DBUS 支路 -> PSRAM（走 flash 右侧空隙 x=865） -->
+    <polyline class="dbus" points="865,430 865,530 900,530"/>
+    <!-- DBUS 支路 -> 外设（走 cache 与 flash 之间空隙 x=500） -->
+    <polyline class="dbus" points="500,430 500,714"/>
+    <text class="blbl" x="298" y="262">指令总线 IBUS</text>
+    <text class="blbl" x="298" y="450">数据总线 DBUS</text>
+  </svg>
+
+  <div id="startOv">
+    <h1>ESP32-S3 启动流程可视化</h1>
+    <p>从上电复位 → Mask ROM → 二级 bootloader → 分区表 / otadata 选槽 → 镜像校验加载 → app_main → OTA 自检。<br>
+    所有地址、段表、日志行均取自本机手表的真机串口输出。</p>
+    <button id="startBtn">▶ 开始上电</button>
+    <button id="startStepBtn" style="background:#182230;border:1px solid #2b3b4e;color:#ffd60a;font-size:15px;padding:9px 30px;border-radius:20px;cursor:pointer;">⏭ 逐步执行</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ================= 基础设施 ================= */
+const $ = id => document.getElementById(id);
+const scaler = $("scaler");
+let speedMult = 1, paused = false, token = 0, ff = false;
+let mode = "play";            // "play" | "step"
+let running = false;
+let autoSteps = 0;            // 步进预请求队列
+let gateWaiter = null;        // {tk,res,rej}
+let curStage = 0, curStep = 0;
+
+function fit() {
+  const s = Math.min(innerWidth / 1600, innerHeight / 900);
+  scaler.style.transform = `scale(${s})`;
+}
+addEventListener("resize", fit); fit();
+
+function sleep(ms) {
+  const real = ms / speedMult / (ff ? 40 : 1);
+  return new Promise((res, rej) => {
+    const tk = token;
+    setTimeout(() => tk === token ? (paused ? waitUnpause(tk).then(res) : res()) : rej("cancel"), real);
+  });
+}
+function waitUnpause(tk) {
+  return new Promise(res => {
+    const iv = setInterval(() => {
+      if (tk !== token) res();
+      else if (!paused) { clearInterval(iv); res(); }
+    }, 60);
+  });
+}
+
+/* 步进门控：step 模式下每个原子步骤执行前在此等待 */
+function gate(my) {
+  if (ff || mode !== "step") {
+    if (paused) return waitUnpause(my);
+    return Promise.resolve();
+  }
+  if (autoSteps > 0) { autoSteps--; updateBadge(); return Promise.resolve(); }
+  return new Promise((res, rej) => {
+    if (my !== token) return rej("cancel");
+    gateWaiter = { tk: my, res, rej };
+    updateBadge();
+  });
+}
+function requestStep() {
+  if (gateWaiter && gateWaiter.tk === token) {
+    const g = gateWaiter; gateWaiter = null; g.res();
+  } else {
+    autoSteps++;   // 正在执行某步，排队到下一步
+  }
+}
+
+/* 日志 */
+function log(text, cls = "lI", stamp = true) {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.textContent = (stamp ? "I (    ) " : "") + text.replace(/^I \(\s*\d+\) /, "");
+  $("consIn").appendChild(d);
+  const box = $("consIn");
+  while (box.children.length > 250) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+
+/* 旁白 */
+function narrate(t, p) {
+  if (ff) return;
+  $("narrT").textContent = t;
+  $("narrP").innerHTML = p;
+}
+function setTab(i) {
+  document.querySelectorAll(".tab").forEach((el, k) => el.classList.toggle("on", k === i));
+}
+
+/* 步进徽标 / 按钮状态 */
+function updateBadge() {
+  const b = $("stepBadge");
+  if (mode !== "step" || ff) { b.style.display = "none"; return; }
+  const waiting = !!gateWaiter;
+  b.style.display = "block";
+  b.textContent = `⏭ ${TABS[curStage]} · 第 ${curStep + 1}/${STAGES[curStage].length} 步` +
+                  (waiting ? " — 点击「步进」继续" : " …");
+}
+function updateButtons() {
+  $("playBtn").textContent = mode === "step" ? "▶ 连续播放" : (paused ? "▶ 播放" : "⏸ 暂停");
+}
+
+/* 寄存器 */
+const regPrev = {};
+function setReg(id, val) {
+  const el = $(id);
+  if (regPrev[id] !== val) {
+    el.querySelector("span").textContent = val;
+    el.classList.remove("up"); void el.offsetWidth; el.classList.add("up");
+    regPrev[id] = val;
+  }
+}
+function hl(id, cls = "hl", ms = 900) {
+  const el = $(id);
+  el.classList.add(cls);
+  return sleep(ms).then(() => el.classList.remove(cls));
+}
+function litPeri(id, text) {
+  const el = $(id);
+  el.classList.add("lit");
+  if (text) el.querySelector(".st").textContent = text;
+}
+
+/* 数据包沿折线移动 */
+function movePacket(points, label, color = "#32d2e0", dur = 750) {
+  return new Promise(res => {
+    const tk = token;
+    const pkt = document.createElement("div");
+    pkt.className = "pkt"; pkt.style.background = color; pkt.style.color = color;
+    pkt.style.left = points[0][0] + "px"; pkt.style.top = points[0][1] + "px";
+    scaler.appendChild(pkt);
+    let lbl = null;
+    if (label) {
+      lbl = document.createElement("div");
+      lbl.className = "plbl"; lbl.textContent = label;
+      scaler.appendChild(lbl);
+    }
+    let t0 = null;
+    const total = points.reduce((s, p, i) =>
+      i ? s + Math.hypot(p[0]-points[i-1][0], p[1]-points[i-1][1]) : 0, 0);
+    const step = ts => {
+      if (tk !== token) { pkt.remove(); lbl && lbl.remove(); return res(); }
+      if (paused) { requestAnimationFrame(step); return; }
+      if (t0 === null) t0 = ts;
+      const el = (ts - t0) / (dur / speedMult / (ff ? 40 : 1));
+      let dist = Math.min(1, el) * total;
+      for (let i = 1; i < points.length; i++) {
+        const dx = points[i][0]-points[i-1][0], dy = points[i][1]-points[i-1][1];
+        const len = Math.hypot(dx, dy);
+        if (dist <= len || i === points.length-1) {
+          const f = len ? Math.min(1, dist/len) : 1;
+          pkt.style.left = (points[i-1][0] + dx*f) + "px";
+          pkt.style.top  = (points[i-1][1] + dy*f) + "px";
+          if (lbl) { lbl.style.left = pkt.style.left; lbl.style.top = pkt.style.top; }
+          break;
+        }
+        dist -= len;
+      }
+      if (el < 1) requestAnimationFrame(step);
+      else { pkt.remove(); lbl && lbl.remove(); res(); }
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+/* SVG 映射线（flash map） */
+function addMap(x1, y1, x2, y2) {
+  const ln = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  ln.setAttribute("x1", x1); ln.setAttribute("y1", y1);
+  ln.setAttribute("x2", x2); ln.setAttribute("y2", y2);
+  ln.setAttribute("class", "mapln");
+  $("buses").appendChild(ln);
+  return sleep(350);
+}
+
+/* SHA 扫描（不改 id，避免 reset 失效） */
+function shaSweep(ms = 1400) {
+  const sw = $("sweepO0");
+  sw.style.transition = "";
+  sw.style.display = "block"; sw.style.width = "0";
+  const real = ms / speedMult / (ff ? 40 : 1);
+  return new Promise(res => {
+    requestAnimationFrame(() => {
+      sw.style.transition = `width ${real}ms linear`;
+      sw.style.width = "100%";
+    });
+    setTimeout(() => {
+      sw.style.display = "none"; sw.style.transition = ""; res();
+    }, real + 60);
+  });
+}
+
+/* ================= 阶段定义（每个阶段 = 原子步骤数组，步进的最小单位） ================= */
+const TABS = ["①上电与ROM","②Bootloader","③分区表·选槽","④校验·加载","⑤进入应用","⑥外设与服务","⑦OTA自检·就绪"];
+const tabsBox = $("tabs");
+TABS.forEach((t, i) => {
+  const d = document.createElement("div");
+  d.className = "tab"; d.textContent = t;
+  d.onclick = () => { mode = "play"; updateButtons(); run(i); };
+  tabsBox.appendChild(d);
+});
+
+/* otadata 两份记录 */
+function otadataShow(seq0, seq1, winner) {
+  $("ote0").textContent = `entry0: seq=${seq0}  state=VALID`;
+  $("ote1").textContent = `entry1: seq=${seq1}  state=VALID`;
+  if (winner) $(winner).classList.add("win");
+}
+function segMark(id, text) {
+  const el = $(id);
+  if (el) el.insertAdjacentHTML("beforeend", `<div>${text}</div>`);
+}
+
+const STAGES = [
+/* ─────────── ① 上电与 ROM ─────────── */
+[
+  async () => {   // 1. 复位
+    setTab(0);
+    narrate("上电复位 · Mask ROM", "rst:0x1 (POWERON)。ROM 是出厂固化的 384KB 代码，负责判断复位原因与启动模式：boot:0x8 表示正常从 Flash 启动（按住 BOOT 键则是 0x0 下载模式）。");
+    setReg("rPC", "0x40000020"); setReg("rSP", "0x3FCE0000");
+    litPeri("peUart", "日志输出中"); litPeri("peSpi1", "读取 Flash");
+    log("rst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)", "lR", false);
+    await sleep(700);
+  },
+  async () => {   // 2. ROM 自报家门
+    log("ESP-ROM:esp32s3-20210327  Build:Mar 27 2021", "lR", false);
+    await hl("rom");
+  },
+  async () => {   // 3. SPI1 搬 bootloader
+    narrate("ROM 通过 SPI1 读取二级 bootloader", "SPI1 控制器把 flash 0x0 处 bootloader 的三个段加载进内部 SRAM。此刻 flash 还跑在低速模式。");
+    await movePacket([[540,175],[500,175],[500,430],[290,430]], "读 0x0 bootloader", "#32d2e0", 900);
+    log("SPIWP:0xee / mode:DIO, clock div:1", "lR", false);
+    log("load:0x3fce2820,len:0x1664", "lR", false);
+    log("load:0x403c8700,len:0xf38", "lR", false);
+    log("load:0x403cb700,len:0x3234", "lR", false);
+    await sleep(300);
+  },
+  async () => {   // 4. 跳入 bootloader
+    log("entry 0x403c8930", "lR", false);
+    setReg("rPC", "0x403C8930"); setReg("rSP", "0x3FCE6B10");
+    await hl("iram");
+    narrate("跳入 bootloader", "PC = 0x403c8930（IRAM）。ROM 的使命结束。");
+    await sleep(600);
+  },
+],
+/* ─────────── ② Bootloader 初始化 ─────────── */
+[
+  async () => {
+    setTab(1);
+    narrate("二级 bootloader (ESP-IDF v6.0)", "初始化时钟、重新配置 flash 为 QIO 80MHz、初始化 8MB Octal PSRAM 并映射到 0x3C00_0000。");
+    log("I (25) boot: ESP-IDF v6.0 2nd stage bootloader");
+    log("I (25) boot: Multicore bootloader");
+    await hl("cpu1", "hlb"); $("cpu1st").textContent = "已由 bootloader 拉起";
+    log("I (31) qio_mode: Enabling default flash chip QIO");
+    log("I (40) boot.esp32s3: Boot SPI Speed : 80MHz");
+  },
+  async () => {
+    await hl("pBl");
+    log("I (43) boot.esp32s3: Flash Size : 16MB");
+  },
+  async () => {
+    narrate("PSRAM 初始化", "8MB Octal PSRAM 通过 0x3C00_0000 映射区可被 CPU 直接寻址——稍后 app 的帧缓冲、任务栈都放这里。");
+    await movePacket([[540,300],[500,300],[500,430],[865,430],[865,530],[900,530]], "PSRAM 初始化", "#32d2e0", 800);
+    await hl("psram", "hlg");
+    log("esp_psram: Found 8MB Octal PSRAM device");
+    log("I (47) boot: Enabling RNG early entropy source...");
+    log("I (1198) spi_flash: detected chip: gd");
+    await sleep(500);
+  },
+],
+/* ─────────── ③ 分区表 + otadata 选槽 ─────────── */
+[
+  async () => {
+    setTab(2);
+    narrate("解析分区表 (0x8000)", "bootloader 从 DBUS 读入分区表的二进制形式，逐条注册 nvs / otadata / phy_init / ota_0 / ota_1 / assets。");
+    await movePacket([[540,206],[500,206],[500,430],[290,430]], "读 0x8000 分区表", "#32d2e0", 800);
+  },
+  async () => {
+    ["pPt","pBl","pOta","pO0","pO1","pAs"].forEach((id,i) =>
+      setTimeout(() => $(id).classList.remove("dim"), i*120));
+    log("I (52) boot: Partition Table:");
+    log("I (61)  0 nvs      WiFi data   0x9000  16K");
+    log("I (67)  1 otadata   OTA data    0xd000  8K");
+    log("I (80)  3 ota_0    OTA app     0x10000 4M");
+    log("I (87)  4 ota_1    OTA app     0x410000 4M");
+    log("I (93)  5 assets   data        0x810000 8M");
+  },
+  async () => { await sleep(600); },
+  async () => {
+    narrate("读取 otadata · 槽位裁决", "读 0xD000 的两份 32B 记录：<b>seq 大且 CRC 有效者胜</b>。槽位 = (seq-1) % 槽数。真机当前值：entry0 seq=1（ota_0 0.9.0），entry1 seq=2（ota_1 0.9.1）→ 选中 ota_1。");
+    await movePacket([[540,250],[500,250],[500,430],[290,430]], "读 0xD000 otadata", "#32d2e0", 800);
+    await hl("pOta");
+  },
+  async () => {
+    otadataShow("1", "2", "ote1");
+    log("otadata: entry0 seq=1 state=VALID(ota_0)");
+    log("otadata: entry1 seq=2 state=VALID(ota_1)  ← WIN");
+    await hl("pO1", "hlg", 1100);
+    $("o0n").textContent = "A 槽 · 0.9.0";
+    $("o1n").textContent = "B 槽 · 0.9.1 ★启动目标";
+    log("I (103) boot: No factory image, trying OTA…");
+    await sleep(500);
+  },
+],
+/* ─────────── ④ 校验 + 加载 ─────────── */
+[
+  async () => {
+    setTab(3);
+    narrate("镜像完整性校验", "对 ota_1 整个 app 镜像逐段检查 magic、段表，并计算追加在镜像尾部的 SHA-256——任何一个字节损坏都会在这里被拒绝（断电下到一半的槽永远不会被启动）。");
+    await shaSweep(1500);
+    log("esp_image: magic OK · 6 segments · sha256 OK");
+  },
+  async () => {
+    narrate("加载段：map 与 load 的区别", "绿色虚线 = <b>map</b>（flash 映射 XIP：代码留在 flash 原地，经缓存按需取指，不占 RAM）；数据包 = <b>load</b>（真正搬进 RAM）。以下是本机固件的 6 个真实段。");
+  },
+  ...[
+    {d:"paddr=00010020 vaddr=3c110020 size=1f5638", kind:"map",  fy:360, ty:500, mark:["segMarksP","✓ 0x3C110020 · 2.0MB 映射"]},
+    {d:"paddr=00205660 vaddr=3fc9bf00 size=057b8",  kind:"load", ty:330, mark:["segMarksD","✓ 0x3FC9BF00 · 22K"]},
+    {d:"paddr=0020ae20 vaddr=40374000 size=051f8",  kind:"load", ty:100, mark:["segMarksI","✓ 0x40374000 · 21K"]},
+    {d:"paddr=00210020 vaddr=42000020 size=103d7c", kind:"map",  fy:420, ty:400, mark:["segMarksD","✓ 0x42000020 · 1.0MB XIP"]},
+    {d:"paddr=00313da4 vaddr=403791f8 size=12c50",  kind:"load", ty:120, mark:["segMarksI","✓ 0x403791F8 · 77K"]},
+    {d:"paddr=003269fc vaddr=50000000 size=00024",  kind:"load", ty:648, mark:["lpseg","✓ seg5 已载入 (36B)"]},
+  ].map((s, i) => async () => {
+    log(`esp_image: segment ${i}: ${s.d} ${s.kind}`);
+    if (s.kind === "map") {
+      await addMap(840, s.fy, 900, s.ty);
+      segMark(s.mark[0], s.mark[1]);
+      await hl("pO1", "hlg", 250);
+    } else {
+      await movePacket([[840,420],[880,420],[880,s.ty],[900,s.ty]], `seg${i} load`, "#32d2e0", 650);
+      segMark(s.mark[0], s.mark[1]);
+    }
+  }),
+  async () => {
+    log("I (620) boot: Loaded app from partition at offset 0x10000");
+    await sleep(400);
+  },
+],
+/* ─────────── ⑤ 进入应用 ─────────── */
+[
+  async () => {
+    setTab(4);
+    narrate("跳转到应用入口", "PC = 0x42000020（flash 映射区，XIP 执行）。FreeRTOS 调度器启动，main_task 创建于 CPU0。");
+    setReg("rPC", "0x42000020"); setReg("rSP", "0x3FCF1A20"); setReg("rA2", "0x00000000");
+    await movePacket([[290,270],[515,270],[515,395],[540,395]], "取指 0x42000020", "#ff9f0a", 700);
+    log("I (1135) app_init: App version:      0.9.0");
+    log("I (1218) main_task: Started on CPU0");
+    log("I (1248) main: === Smartwatch init ===");
+  },
+  async () => {
+    await hl("cpu");
+    narrate("app_main 初始化硬件", "灭屏 → 显示 SPI2+DMA（ST7789）→ 触摸 I2C0（CST816，写 0xFA 关自动休眠）→ LVGL 任务在 CPU1 跑起来 → 注册应用 → ota_update_init（NVS）→ 背光渐亮。上电到现在 ≈ 2 秒。");
+  },
+  async () => {
+    await movePacket([[500,430],[500,760],[424,760],[424,714]], "SPI2+DMA 初始化", "#32d2e0", 700);
+    litPeri("peSpi2", "ST7789 240×280 就绪"); litPeri("peGpio", "背光 PWM / 触摸中断");
+  },
+  async () => {
+    await movePacket([[500,430],[500,760],[616,760],[616,714]], "I2C0 → CST816S", "#32d2e0", 700);
+    litPeri("peI2c", "触摸 0x15 · INT GPIO3");
+  },
+  async () => {
+    await hl("cpu1", "hlb"); $("cpu1st").textContent = "LVGL 渲染 30fps";
+    log("I (1378) touch: I2C bus initialized (SDA=11, SCL=12)");
+    log("I (1598) touch: CST816S chip ID: 181 (0xB5)");
+    log("I (1638) ota: ota_update ready, current version 0.9.0");
+    await sleep(400);
+  },
+],
+/* ─────────── ⑥ 网络与服务 ─────────── */
+[
+  async () => {
+    setTab(5);
+    narrate("联网（阻塞 main_task ≈7s）", "start_wifi() 从 NVS 读凭据（无则回落硬编码 SSID），阻塞重试直到连上。期间 LVGL 在 CPU1 独立渲染——界面完全可操作。");
+    litPeri("peWifi", "STA 连接中…");
+    $("peWifi").querySelectorAll(".ring").forEach(r => r.classList.add("go"));
+    log("I (1938) wifi station: ESP_WIFI_MODE_STA");
+    await sleep(1200);
+  },
+  async () => {
+    log("I (9038) wifi station: got ip:192.168.10.99");
+    litPeri("peWifi", "已连接 192.168.10.99");
+  },
+  async () => {
+    narrate("后台服务起飞", "SNTP 对时（阿里云）→ 状态栏时间开始走；mimiclaw AI 任务（PSRAM 栈）；内存监控每 10s 打印堆况。大栈任务都放 PSRAM，把内部 RAM 留给 DMA。");
+    log("I (8928) mimiclaw: Initialized (model: glm-5.1)");
+    log("I (10268) main: Time synchronized");
+    log("I (18948) RAM: 169KB  PSRAM: 8124KB");
+    setReg("rPC", "0x4200xxxx (idle循环)");
+    await sleep(700);
+  },
+],
+/* ─────────── ⑦ OTA 自检 · 就绪 ─────────── */
+[
+  async () => {
+    setTab(6);
+    narrate("OTA 升级后的首启才有这一步", "bootloader 已把新槽标为 PENDING_VERIFY。ota_selftest_start() 检测到后：NVS boottry 计数 +1（≥3 直接回滚），随后开 15 秒自检窗口。");
+    $("o1n").textContent = "B 槽 · 0.9.1 ★PENDING_VERIFY";
+    log("ota_selftest: pending-verify boot #1", "lW");
+    await sleep(1000);
+  },
+  async () => {
+    narrate("15 秒自检窗口", "窗口内系统崩溃 → boottry 累计 ≥3 → mark_app_invalid_rollback_and_reboot() 自动回滚旧版本。通过则 cancel_rollback 永久转正。");
+    await sleep(1200);
+  },
+  async () => {
+    log("I ota_selftest: heartbeat delta=15 need>=7");
+    log("I ota_selftest: internal free=162KB");
+    log("I ota_selftest: self-test passed, image confirmed");
+    $("o1n").textContent = "B 槽 · 0.9.1 ✓VALID";
+    otadataShow("1", "2", "ote1");
+    await hl("pO1", "hlg", 1200);
+  },
+  async () => {
+    narrate("系统就绪", "三层引导各司其职：<b>ROM</b> 管启动模式，<b>bootloader</b> 管“从哪起 + 镜像是否完整”，<b>app_main</b> 管世界长什么样。任何一层否定，都回落到已知可用状态。");
+    log("=== SYSTEM READY ===", "lI", false);
+  },
+],
+];
+
+/* ================= 重置与调度 ================= */
+function reset() {
+  document.querySelectorAll(".pkt,.plbl").forEach(e => e.remove());
+  document.querySelectorAll(".mapln").forEach(e => e.remove());
+  $("sweepO0").style.display = "none"; $("sweepO0").style.transition = "";
+  ["pPt","pBl","pOta","pO0","pO1","pAs"].forEach(id => $(id).classList.add("dim"));
+  ["ote0","ote1"].forEach(id => {
+    $(id).classList.remove("win");
+    $(id).textContent = id === "ote0" ? "entry0: seq=-------- state=--------"
+                                      : "entry1: seq=-------- state=--------";
+  });
+  $("o0n").textContent = "A 槽"; $("o1n").textContent = "B 槽";
+  ["segMarksI","segMarksD","segMarksP","lpseg"].forEach(id => $(id).innerHTML = "");
+  ["peUart","peSpi1","peSpi2","peI2c","peGpio"].forEach(id => {
+    $(id).classList.remove("lit"); $(id).querySelector(".st").textContent = "未上电";
+  });
+  $("peWifi").classList.remove("lit");
+  $("peWifi").querySelector(".st").textContent = "未上电";
+  $("peWifi").querySelectorAll(".ring").forEach(r => r.classList.remove("go"));
+  $("cpu1st").textContent = "待命";
+  ["rPC","rSP","rA0","rA2"].forEach(id => $(id).querySelector("span").textContent = "--------");
+  document.querySelectorAll(".blk,.part,.mrow").forEach(e => e.classList.remove("hl","hlb","hlg"));
+  $("consIn").innerHTML = "";
+}
+
+async function run(from = 0) {
+  token++;
+  const my = token;
+  if (gateWaiter) { const g = gateWaiter; gateWaiter = null; try { g.rej("cancel"); } catch (e) {} }
+  autoSteps = 0;
+  reset();
+  paused = false; updateButtons();
+  running = true;
+  try {
+    for (let i = 0; i < STAGES.length; i++) {
+      ff = i < from;
+      if (my !== token) return;
+      curStage = i;
+      for (let j = 0; j < STAGES[i].length; j++) {
+        curStep = j;
+        await gate(my);
+        if (my !== token) return;
+        updateBadge();
+        await STAGES[i][j]();
+        if (my !== token) return;
+      }
+    }
+  } catch (e) { if (e !== "cancel") console.error(e); }
+  ff = false; running = false; updateBadge();
+}
+
+/* ================= 控件 ================= */
+$("speed").onchange = e => speedMult = parseFloat(e.target.value);
+$("playBtn").onclick = () => {
+  if (mode === "step") {          // 步进中 → 切回连续播放
+    mode = "play"; paused = false;
+    if (gateWaiter) { const g = gateWaiter; gateWaiter = null; g.res(); }
+  } else {
+    paused = !paused;
+  }
+  updateButtons(); updateBadge();
+};
+$("stepBtn").onclick = () => {
+  if (!running) {                 // 空闲时：进入步进模式并立即执行第一步
+    mode = "step"; autoSteps = 1;
+    $("startOv").style.display = "none";
+    run(0); updateButtons();
+    return;
+  }
+  if (mode !== "step") { mode = "step"; updateButtons(); }
+  paused = false;
+  requestStep();
+  updateBadge();
+};
+$("resetBtn").onclick = () => {
+  token++;
+  if (gateWaiter) { const g = gateWaiter; gateWaiter = null; try { g.rej("cancel"); } catch (e) {} }
+  autoSteps = 0; mode = "play"; running = false; ff = false;
+  reset(); setTab(-1); updateButtons(); updateBadge();
+  narrate("就绪", "点击阶段标签、播放或步进开始。");
+};
+$("startBtn").onclick = () => {
+  $("startOv").style.display = "none";
+  mode = "play"; updateButtons(); run(0);
+};
+$("startStepBtn").onclick = () => {
+  $("startOv").style.display = "none";
+  mode = "step"; autoSteps = 1; updateButtons(); run(0);
+};
+</script>
+</body>
+</html>
