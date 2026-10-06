@@ -1,6 +1,23 @@
 # Blink — ESP32-S3 Smartwatch Firmware
 
-基于 ESP32-S3 的智能手表固件，使用 LVGL 9 构建触摸交互界面，采用 Apple 风格深色主题设计。
+基于 ESP32-S3 的智能手表固件：LVGL 9 触摸界面（Apple 风格深色主题）、双核 FreeRTOS 任务编排、A/B 双槽 OTA 升级（自检 + 崩溃回滚），并移植了接入智谱 GLM 的 AI 对话助手。
+
+## 功能特性
+
+- **双核任务编排** — LVGL 渲染独占 Core 1，业务任务全在 Core 0，渲染帧率不受网络/AI/OTA 抖动影响
+- **高速显示** — ST7789 SPI + DMA @ 80 MHz，partial refresh 只重绘脏区域
+- **电容触摸** — CST816S I2C，INT 中断唤醒 + 轮询混合模型，带幻触发抑制
+- **A/B 双槽 OTA** — manifest + semver 比对 + 流式下载 + SHA-256 回读校验；15 秒开机自检（LVGL 心跳 + 堆水位双判据）与崩溃自动回滚，真机完成多版本连续升级
+- **内存布局** — 大栈任务与 LVGL 绘制缓冲驻 8MB PSRAM（借 S3 EDMA 直访刷屏），稀缺内部 RAM 留给协议栈与 DMA
+- **应用框架** — App 生命周期管理、页面导航栈、后台保留池、手势导航、状态栏 / 通知中心 / 快捷设置
+- **AI 对话** — 移植 MimiClaw 接入 GLM-5.1，48KB PSRAM 栈任务按需创建、用完自毁
+- **全量中文** — GB2312 自定义 CJK 字体（6864 字形，微软雅黑）
+
+<!-- TODO: 在此处补充实机照片 / 演示 GIF（建议放 docs/ 目录，宽度 ~400px 两列排布）
+## 演示
+![表盘](docs/demo-watchface.jpg)
+![AI 对话](docs/demo-chat.jpg)
+-->
 
 ## 硬件规格
 
@@ -16,66 +33,97 @@
 
 ### 引脚定义
 
-| 功能 | GPIO |
-|------|------|
-| LCD MOSI | 13 |
-| LCD CLK | 14 |
-| LCD DC | 21 |
-| LCD RST | 10 |
-| LCD BCKL | 8 |
-| TP SDA | 11 |
-| TP SCL | 12 |
-| TP RST | 9 |
-| TP INT | 3 |
+| 功能 | GPIO | | 功能 | GPIO |
+|------|------|---|------|------|
+| LCD MOSI | 13 | | TP SDA | 11 |
+| LCD CLK | 14 | | TP SCL | 12 |
+| LCD DC | 21 | | TP RST | 9 |
+| LCD RST | 10 | | TP INT | 3 |
+| LCD BCKL | 8 | | | |
 
-## 软件架构
+## 系统架构
+
+### 组件分层
 
 ```
-┌─────────────────────────────────────────────────┐
-│                   Apps Layer                     │
-│  Clock | Launcher | Settings | MimicLaw | ...   │
-├─────────────────────────────────────────────────┤
-│               App Framework                      │
-│  Manager | Registry | Nav Stack | Gesture | UI  │
-├─────────────────────────────────────────────────┤
-│                Platform HAL                      │
-│  Display (SPI+DMA) | Touch (I2C) | Backlight    │
-├─────────────────────────────────────────────────┤
-│  LVGL 9.5 | ESP-IDF v6.0 | FreeRTOS | WiFi      │
-└─────────────────────────────────────────────────┘
+┌ 应用层 ──────────────────────────────────────────────────────────
+│  main/app_main.c     开机时序编排：外设→框架→OTA→WiFi→任务创建
+│  apps/               launcher · clock · stopwatch · touch_test
+│                       settings(含固件升级页) · mimiclaw(AI 对话 UI)
+├ 应用框架层 ──────────────────────────────────────────────────────
+│  app_framework/      app_manager(生命周期) · app_registry(注册表)
+│                       gesture(手势导航) · nav_stack(页面返回栈)
+│                       sys_ui(状态栏/通知) · theme(深色主题)
+├ 中间件（不依赖硬件与 UI，可整体复用）────────────────────────────
+│  ota_update/         manifest · semver · 流式下载 · 双校验 · 自检回滚
+│  mywifi/             STA 连接 · AP 扫描 · NVS 凭据
+│  mimiclaw_core/      AI 对话引擎：HTTPS → GLM
+├ 硬件抽象层 HAL ─────────────────────────────────────────────────
+│  platform/           display.c(ST7789) touch.c(CST816S)
+│                       backlight.c(LEDC) · board.h(引脚集中) · fonts/
+├ 第三方组件 ─────────────────────────────────────────────────────
+│  lvgl 9.5 · esp_lvgl_port · esp_lcd_touch(+cst816s) · cjson
+├ ESP-IDF v6.0 ───────────────────────────────────────────────────
+│  FreeRTOS(双核) · esp_lcd · spi/i2c/gpio/ledc · esp_wifi+lwIP
+│  esp_https_ota + app_update + mbedtls · NVS · bootloader
+└──────────────────────────────────────────────────────────────────
 ```
 
-### 目录结构
+依赖方向由各组件 `CMakeLists.txt` 的 REQUIRES 固化：`mimiclaw_core` / `mywifi` / `ota_update` 三个中间件不依赖任何硬件或 UI 组件；`main` 是唯一认识全部组件的组合根。
+
+### 运行时：双核任务视图
+
+```
+        CPU 1                              CPU 0
+  ┌──────────────────┐   INT(GPIO3)  ┌─────────────────────────────
+  │ taskLVGL  prio 4 │ ←───────────  │ main      LED 心跳          │
+  │ 渲染 + 输入轮询   │  CST816S 抬手  │ sntp      NTP 对时          │
+  └──────────────────┘  唤醒 LVGL     │ mem       内存水位监控       │
+         ↑ lvgl_port_lock             │ + 按需: mimiclaw / ota /    │
+         └── 所有上层访问 UI 过同一把锁  │         ota_chk / wifi_scan │
+                                      └─────────────────────────────
+```
+
+常驻 4 任务 + 4 类按需任务（详见下方任务表），日常并发 4、峰值 6。
+
+### Flash 布局
+
+```
+0x9000      0xd000        0xf000       0x10000       0x410000      0x810000
+┌─────────┬─────────────┬──────────┬─────────────┬─────────────┬──────────┐
+│  nvs    │   otadata   │  phy     │  ota_0 4MB  │  ota_1 4MB  │ assets   │
+│ 凭据/计数│ seq大者胜+状态│ 射频校准  │   slot A    │   slot B    │  7.9MB   │
+└─────────┴─────────────┴──────────┴─────────────┴─────────────┴──────────┘
+```
+
+## 目录结构
 
 ```
 blink/
 ├── main/
-│   └── app_main.c              # 入口：硬件初始化、WiFi、SNTP、LED 闪烁
+│   └── app_main.c              # 入口：硬件初始化、OTA、WiFi、任务创建
 ├── components/
 │   ├── platform/               # 硬件抽象层
-│   │   ├── src/display.c       # SPI+DMA 显示驱动，ST7789
-│   │   ├── src/touch.c         # CST816S I2C 触摸，中断唤醒
+│   │   ├── src/display.c       # SPI+DMA 显示驱动，ST7789，80MHz
+│   │   ├── src/touch.c         # CST816S I2C 触摸，INT 唤醒 + 幻触发抑制
 │   │   ├── src/backlight.c     # LEDC PWM 背光控制
 │   │   ├── fonts/              # GB2312 CJK 字体 (14px, 16px)
 │   │   └── include/board.h     # 引脚、分辨率、常量定义
 │   ├── app_framework/          # 应用框架
-│   │   ├── src/app_manager.c   # 生命周期管理，导航栈，后台保留池
+│   │   ├── src/app_manager.c   # 生命周期管理，后台保留池
 │   │   ├── src/app_registry.c  # 应用注册表 (最多 16 个)
 │   │   ├── src/nav_stack.c     # 导航栈 (最大深度 8)
-│   │   ├── src/gesture.c       # 手势识别 (点击、滑动、长按)
+│   │   ├── src/gesture.c       # 手势识别 (边缘滑动、点击、长按)
 │   │   ├── src/theme.c         # Apple 风格主题 + CJK fallback
 │   │   └── src/sys_ui.c        # 状态栏、通知面板、快捷设置
-│   ├── apps/                   # 内置应用
-│   │   ├── clock/              # 模拟时钟 (秒针/分针/时针)
-│   │   ├── launcher/           # 应用启动器网格
-│   │   ├── settings/           # 设置 (WiFi/显示/关于/性能叠加层)
-│   │   ├── stopwatch/          # 秒表 (30ms 精度)
-│   │   ├── touch_test/         # 触摸调试工具
-│   │   └── mimiclaw/           # AI 聊天界面
-│   ├── mimiclaw_core/          # AI 聊天客户端 (GLM-5.1)
-│   ├── mywifi/                 # WiFi STA，扫描，NVS 凭据存储
-│   └── myui/                   # GUI Guider 旧版资源 (LVGL 8.x)
-├── partitions.csv              # 分区表：factory 8MB
+│   ├── apps/                   # 内置应用 (见下方列表)
+│   ├── mimiclaw_core/          # AI 聊天引擎 (GLM-5.1，纯中间件)
+│   ├── mywifi/                 # WiFi STA，扫描，NVS 凭据
+│   └── ota_update/             # A/B 双槽 OTA + 自检回滚 (纯中间件)
+├── ota_server/                 # 本地升级服务器样例 (manifest.json)
+├── tools/
+│   └── boot_flow.html          # 交互式启动流程可视化 (浏览器打开)
+├── partitions.csv              # 分区表：A/B 双槽 4MB×2 + assets
 ├── sdkconfig.defaults          # 编译默认配置
 └── DESIGN.md                   # Apple 设计系统参考
 ```
@@ -87,7 +135,7 @@ blink/
 | **Clock** | 模拟时钟，带秒针和日期显示。点击中心打开启动器 | System |
 | **Launcher** | 已安装应用图标网格 | System |
 | **AI Chat** (MimicLaw) | 基于 GLM-5.1 的 AI 聊天，支持中文对话 | Tool |
-| **Settings** | WiFi 扫描/连接、亮度调节、关于、性能叠加层 | Tool |
+| **Settings** | WiFi 扫描/连接、亮度调节、固件升级、关于、性能叠加层 | Tool |
 | **Stopwatch** | 秒表，开始/停止/计圈/重置 | Tool |
 | **Touch Test** | 触摸坐标显示，网格背景 | Tool |
 
@@ -137,7 +185,7 @@ typedef struct {
 ## 系统界面
 
 - **状态栏**：28px 高，显示时间（左）和 WiFi 图标（右），半透明背景
-- **通知面板**：从顶部滑入，点击关闭
+- **通知面板**：从顶部滑入，点击关闭；OTA 完成 / 升级成功通知走这里
 - **快捷设置**：从底部滑入，包含亮度滑块
 - **性能叠加层**：右上角显示 FPS 和 CPU%，通过 Settings → Performance 开关
 
@@ -163,23 +211,84 @@ typedef struct {
 | 配置 | 值 | 说明 |
 |------|-----|------|
 | CPU 频率 | 240 MHz | 最高主频 |
-| LVGL 渲染 | 2 draw units + FreeRTOS OS | 并行渲染 |
-| I-Cache | 32 KB | 减少 Flash 缓存未命中 |
-| D-Cache line | 64B | 提升 PSRAM DMA 带宽 |
+| 绑核 | LVGL→Core1，业务→Core0 | 渲染不受业务抖动影响 |
+| 绘制缓冲 | PSRAM 双缓冲 | 借 S3 EDMA 直访，省内部 RAM |
 | 显示模式 | Partial refresh | 只重绘脏区域 |
 | SPI DMA | 9600B transfer | 减少 DMA 中断次数 |
 | 手势轮询 | 50ms | 降低空转开销 |
 
 ## FreeRTOS 任务
 
-| 任务 | 优先级 | 核心 | 栈大小 | 说明 |
-|------|--------|------|--------|------|
-| LVGL | 4 | Core 1 | 16 KB | UI 渲染主循环 |
-| MimicLaw Chat | 5 | Core 0 | 12 KB (PSRAM) | AI HTTP 请求 |
-| WiFi Scan | 5 | Any | 4 KB | 扫描任务 |
-| SNTP | 3 | Any | 4 KB (PSRAM) | 时间同步 |
-| Memory Monitor | 1 | Any | 3 KB (PSRAM) | 堆内存日志 |
-| Main (LED) | 1 | Core 0 | 3.5 KB | LED 循环闪烁 |
+常驻任务：
+
+| 任务 | 核心 | 优先级 | 栈 | 说明 |
+|------|------|--------|-----|------|
+| main | 0 | 1 | 3.5 KB | 初始化 + LED 心跳 |
+| taskLVGL | **1** | 4 | 16 KB | 渲染、输入、动画 |
+| sntp | any | 3 | 16 KB (PSRAM) | NTP 对时，之后低频保活 |
+| mem | any | 1 | 12 KB (PSRAM) | 每 10s 打印堆水位 |
+
+按需任务（用完自毁）：
+
+| 任务 | 核心 | 优先级 | 栈 | 触发 |
+|------|------|--------|-----|------|
+| mimiclaw | 0 | 5 | 48 KB (PSRAM) | 每次 AI 对话 |
+| ota | 0 | 4 | 12 KB (**内部 RAM**) | 每次升级（见踩坑 #3） |
+| ota_chk | any | 3 | 3 KB | 升级后 15s 自检窗口 |
+| wifi_scan | any | 5 | 16 KB | 每次 AP 扫描 |
+
+> 栈深按字节标注。大栈任务迁 PSRAM 以保留内部 RAM，唯一例外是 OTA 任务——见踩坑记录。
+
+## OTA 固件升级
+
+固件采用 A/B 双 slot（`ota_0`/`ota_1` 各 4MB）+ 崩溃自动回滚，组件为 `components/ota_update/`，支持断电/崩溃安全的升级。
+
+### 升级流程
+
+1. Settings → Firmware → **Check for Updates**：拉取 manifest（Kconfig 配置 URL）并与当前版本做 semver 比较
+2. **Download Update**：`esp_https_ota` 流式下载到空闲 slot（3MB 固件边下边写，无需整体缓存）；下载完成后分块读回 flash、重算 SHA-256 与 manifest 比对（防"合法但配错"的镜像）
+3. **Reboot to Apply**（两击确认）：切换 boot slot 重启
+4. 新镜像首次开机进入 15s 自检窗口（LVGL 心跳 tick 增量 + 内部堆水位双判据），通过后 `esp_ota_mark_app_valid_cancel_rollback()` 转正；未确认即崩溃 → bootloader 下次启动将其标记 ABORTED 并自动回退旧槽；应用层另有 NVS 启动计数（≥3 次立即回滚）作防御纵深
+5. WiFi 未连上属软判据：只告警不回滚——回滚会让旧版本同样无法联网，反而锁死升级通道
+
+### 更新服务器契约
+
+manifest JSON（部署时设置 `Cache-Control: no-cache`）：
+
+```json
+{
+  "version": "0.9.1",
+  "url": "https://ota.example.com/watch/bin/blink-0.9.1.bin",
+  "sha256": "<64 hex，对 .bin 本身，可选但强烈建议>",
+  "size": 3237472,
+  "notes": "更新说明（支持中文）"
+}
+```
+
+### 发版步骤
+
+```bash
+# 1. 升版本号（根 CMakeLists.txt → PROJECT_VER，写入 esp_app_desc_t）
+# 2. 编译
+idf.py build
+# 3. 计算 sha256
+python -c "import hashlib;print(hashlib.sha256(open('build/blink.bin','rb').read()).hexdigest())"
+# 4. 上传 blink.bin（版本化 URL，不可变）并更新 manifest.json 的 version/url/sha256/size/notes
+```
+
+### LAN 调试
+
+```bash
+# PC 上起本地服务器，放好 manifest.json 与 blink.bin
+cd ota_server && python -m http.server 8000
+# menuconfig: OTA Update → OTA manifest URL = http://<PC-IP>:8000/manifest.json
+# 并临时开启 CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y（仅调试，生产必须 HTTPS）
+```
+
+### 注意
+
+- 从旧单 factory 分区表迁移需 `idf.py erase-flash` 全量重刷一次（NVS 中的 WiFi 凭据会丢失）
+- 量产前建议开启 Secure Boot V2 + Flash 加密 + 防回滚（烧 efuse 不可逆，留到最后）
 
 ## 编译与烧录
 
@@ -187,19 +296,30 @@ typedef struct {
 
 - ESP-IDF v6.0
 - Python 3.10+
-- Node.js (用于 CJK 字体生成)
 
-### 编译
+### 配置密钥（clone 后必做）
 
-```bash
-# 在 ESP-IDF 终端中
-idf.py build
+仓库**不含任何密钥**。两个本地头文件被 git 忽略，源码通过 `__has_include` 自动加载，缺失时回退占位符：
+
+```c
+// components/mywifi/wifi_secrets.h            （WiFi 兜底凭据）
+#pragma once
+#define EXAMPLE_ESP_WIFI_SSID      "你的WiFi名"
+#define EXAMPLE_ESP_WIFI_PASS      "你的WiFi密码"
+
+// components/mimiclaw_core/include/mimiclaw_secrets.h   （智谱 API Key）
+#pragma once
+#define MIMICLAW_SECRET_API_KEY    "你的智谱APIKey"
 ```
 
-### 烧录
+> WiFi 更推荐直接在手表 **Settings → WiFi** 里连接（存 NVS，优先级高于编译期兜底）；
+> API Key 同样支持运行时经 `mimiclaw_set_api_key()` 写入 NVS。
+
+### 编译与烧录
 
 ```bash
-idf.py -p COM端口 flash
+idf.py build
+idf.py -p COM端口 flash monitor
 ```
 
 ### 全量烧录命令
@@ -212,6 +332,19 @@ python -m esptool --chip esp32s3 -b 460800 \
   0xd000  build/ota_data_initial.bin \
   0x10000 build/blink.bin
 ```
+
+## 踩坑记录
+
+调试中踩过的硬件坑，记录在此供同类项目参考：
+
+1. **ST7789 不亮 / 花屏**：这块屏的 SPI 拓扑必须用 **SPI mode 3 + sio_mode**（见 `display.c`），大多数例程默认 mode 0，直接照抄会黑屏。
+2. **CST816S 幻触发**：抬手后每隔约 10 秒在上次坐标处冒出一次"幽灵触摸"——芯片空闲周期会把未被主机消费的旧报告重新断言。修复三件套：读坐标前**先读手势寄存器 0x01**（消费掉挂起报告）、写 `0xFA=0xFF` 关闭自动休眠、主机侧**两帧确认**才算按下（见 `touch.c`）。
+3. **OTA 任务不能用 PSRAM 栈**：flash 写操作会暂停 cache，而 PSRAM 访问依赖 cache——自己把自己锁死。OTA worker 必须用内部 RAM 栈（`ota_config.h` 有注释）。
+4. **LVGL 双缓冲放 PSRAM**：ESP32-S3 的 LCD 外设可经 EDMA 直接访问 PSRAM，绘制缓冲不必挤占内部 RAM（`lvgl_port_display_cfg_t.flags.buff_spiram`）。
+
+## 启动流程可视化
+
+[tools/boot_flow.html](tools/boot_flow.html) — 纯前端交互式动画，逐级演示从上电到应用启动的全流程：ROM 加载 bootloader → otadata 双槽选择 → 段表映射（IRAM/DRAM/XIP）→ 外设初始化 → 自检窗口，支持步进单步执行。浏览器直接打开即可。
 
 ## 添加新应用
 
@@ -247,56 +380,6 @@ app_registry_register(&app_descriptor_my_app);
 ```
 
 3. 在 `components/apps/CMakeLists.txt` 中添加源文件。
-
-## OTA 固件升级
-
-固件采用 A/B 双 slot（`ota_0`/`ota_1` 各 4MB）+ 崩溃自动回滚，组件为 `components/ota_update/`。
-
-### 升级流程
-
-1. Settings → Firmware → **Check for Updates**：拉取 `OTA_MANIFEST_URL`（Kconfig 配置）并与当前版本比较
-2. **Download Update**：`esp_https_ota` 流式下载到空闲 slot，可选回读 sha256 复核
-3. **Reboot to Apply**（两击确认）：切换 boot slot 重启
-4. 新镜像首次开机进入 15s 自检窗口（LVGL 心跳 + 内部堆余量），通过后 `esp_ota_mark_app_valid_cancel_rollback()`；窗口内崩溃累计 3 次自动回滚旧版本
-
-### 更新服务器契约
-
-manifest JSON（部署时设置 `Cache-Control: no-cache`）：
-
-```json
-{
-  "version": "0.9.1",
-  "url": "https://ota.example.com/watch/bin/blink-0.9.1.bin",
-  "sha256": "<64 hex，对 .bin 本身，可选但强烈建议>",
-  "size": 3237472,
-  "notes": "更新说明（支持中文）"
-}
-```
-
-### 发版步骤
-
-```bash
-# 1. 升版本号（根 CMakeLists.txt → PROJECT_VER，写入 esp_app_desc_t）
-# 2. 编译
-python -m esptool --chip esp32s3 read-flash ...   # 或直接使用 build/blink.bin
-# 3. 计算 sha256
-python -c "import hashlib;print(hashlib.sha256(open('build/blink.bin','rb').read()).hexdigest())"
-# 4. 上传 blink.bin（版本化 URL，不可变）并更新 manifest.json 的 version/url/sha256/size/notes
-```
-
-### LAN 调试
-
-```bash
-# PC 上起本地服务器，放好 manifest.json 与 blink.bin
-python -m http.server 8000
-# menuconfig: OTA Update → OTA manifest URL = http://<PC-IP>:8000/manifest.json
-# 并临时开启 CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y（仅调试，生产必须 HTTPS）
-```
-
-### 注意
-
-- 从旧单 factory 分区表迁移需 `idf.py erase-flash` 全量重刷一次（NVS 中的 WiFi 凭据会丢失）
-- 量产前建议开启 Secure Boot V2 + Flash 加密 + 防回滚（烧 efuse 不可逆，留到最后）
 
 ## 重新生成 CJK 字体
 
